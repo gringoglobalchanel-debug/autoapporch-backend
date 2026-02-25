@@ -56,7 +56,18 @@ app.use(sentry.sentryRequestHandler());
 app.use(sentry.sentryTracingHandler());
 app.use(helmet());
 app.use(cors({
-  origin: process.env.CORS_ORIGIN || 'http://localhost:3000',
+  origin: function(origin, callback) {
+    const allowedOrigins = [
+      'https://autoapporchestrator.com',
+      'https://www.autoapporchestrator.com',
+      'http://localhost:3000'
+    ];
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
   credentials: true
 }));
 
@@ -129,7 +140,7 @@ app.use(errorHandler);
 // INICIAR SERVIDOR
 // ============================================
 
-const server = app.listen(PORT, () => {
+const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`
 ╔════════════════════════════════════════╗
 ║   AutoAppOrchestrator Backend API     ║

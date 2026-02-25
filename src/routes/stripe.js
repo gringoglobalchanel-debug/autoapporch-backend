@@ -162,6 +162,8 @@ router.post('/create-checkout', authenticate, asyncHandler(async (req, res) => {
           payment_method_types: ['card'],
           line_items: [{ price: priceId, quantity: 1 }],
           customer: currentSub.stripe_customer_id,
+          // 👇 CÓDIGOS PROMOCIONALES ACTIVADOS PARA UPGRADE
+          allow_promotion_codes: true,
           subscription_data: {
             items: [{ id: subscriptionItemId, price: priceId }],
             metadata: {
@@ -245,6 +247,8 @@ router.post('/create-checkout', authenticate, asyncHandler(async (req, res) => {
       mode: 'subscription',
       success_url: `${process.env.CORS_ORIGIN || 'http://localhost:3000'}/dashboard?success=true&plan=${plan}`,
       cancel_url: `${process.env.CORS_ORIGIN || 'http://localhost:3000'}/billing?canceled=true`,
+      // 👇 CÓDIGOS PROMOCIONALES ACTIVADOS PARA NUEVOS USUARIOS
+      allow_promotion_codes: true,
       metadata: {
         userId: req.user.id,
         plan: planName,

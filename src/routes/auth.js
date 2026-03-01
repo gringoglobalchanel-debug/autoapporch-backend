@@ -13,7 +13,6 @@ dotenv.config();
 
 const router = express.Router();
 
-// Cliente de Supabase
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY
@@ -21,27 +20,25 @@ const supabase = createClient(
 
 /**
  * POST /api/auth/register
- * Registrar nuevo usuario con prueba gratuita de 15 días
+ * Registrar nuevo usuario — trial de 7 días, requiere elegir plan
  */
 router.post('/register', asyncHandler(async (req, res) => {
   const { email, password, fullName } = req.body;
 
-  // Validación
   if (!email || !password) {
     return res.status(400).json({
       success: false,
-      message: 'Email and password are required'
+      message: 'Email y contraseña son requeridos'
     });
   }
 
   if (password.length < 6) {
     return res.status(400).json({
       success: false,
-      message: 'Password must be at least 6 characters'
+      message: 'La contraseña debe tener al menos 6 caracteres'
     });
   }
 
-  // Registrar en Supabase Auth
   const { data: authData, error: authError } = await supabase.auth.admin.createUser({
     email,
     password,
@@ -60,7 +57,6 @@ router.post('/register', asyncHandler(async (req, res) => {
     });
   }
 
-  // Crear usuario en nuestra base de datos + suscripción trial
   try {
     // 1. Insertar usuario
     await query(
@@ -69,73 +65,69 @@ router.post('/register', asyncHandler(async (req, res) => {
       [authData.user.id, email, fullName || '', 'user', 'free_trial']
     );
 
-    // 2. Crear suscripción trial de 15 días
+    // 2. ✅ FIX: Trial de 7 días con 1 app permitida
     await query(
       `INSERT INTO subscriptions (
-        user_id, 
-        plan, 
-        status, 
-        trial_ends_at,
-        token_limit,
-        tokens_used,
-        apps_allowed,
-        apps_created,
-        created_at,
-        updated_at
-      ) VALUES ($1, $2, $3, NOW() + INTERVAL '15 days', $4, 0, $5, 0, NOW(), NOW())`,
+        user_id, plan, status, trial_ends_at,
+        token_limit, tokens_used,
+        apps_allowed, apps_created,
+        domains_allowed, domains_used,
+        created_at, updated_at
+      ) VALUES ($1, $2, $3, NOW() + INTERVAL '7 days', $4, 0, $5, 0, 0, 0, NOW(), NOW())`,
       [
-        authData.user.id, 
-        'free_trial', 
-        'trial', 
+        authData.user.id,
+        'free_trial',
+        'trial',
         10000,  // token_limit
-        1       // apps_allowed
+        1       // apps_allowed — solo 1 app en trial
       ]
     );
 
-    // 3. Registrar log de trial
+    // 3. Log
     await query(
       `INSERT INTO logs (user_id, log_type, message, metadata)
        VALUES ($1, $2, $3, $4)`,
       [
         authData.user.id,
         'info',
-        'Usuario registrado con trial de 15 días',
+        'Usuario registrado con trial de 7 días',
         JSON.stringify({ 
-          trial_days: 15, 
-          trial_ends: new Date(Date.now() + 15 * 24 * 60 * 60 * 1000) 
+          trial_days: 7,
+          trial_ends: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+          requires_plan_selection: true
         })
       ]
     );
 
   } catch (dbError) {
-    // Si falla la creación en DB, eliminar de Supabase Auth
     await supabase.auth.admin.deleteUser(authData.user.id);
-    
     console.error('❌ Database user creation error:', dbError);
     return res.status(500).json({
       success: false,
-      message: 'Failed to create user profile'
+      message: 'Error al crear el perfil de usuario'
     });
   }
 
   res.status(201).json({
     success: true,
-    message: 'User registered successfully. 15-day free trial started!',
+    message: '¡Cuenta creada! Tienes 7 días de prueba gratuita.',
     user: {
       id: authData.user.id,
       email: authData.user.email,
       fullName: fullName || ''
     },
     trial: {
-      days: 15,
-      endsAt: new Date(Date.now() + 15 * 24 * 60 * 60 * 1000)
-    }
+      days: 7,
+      endsAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)
+    },
+    // ✅ Indicar al frontend que debe ir a /billing
+    requiresPlanSelection: true,
+    redirectTo: '/billing?new_user=true'
   });
 }));
 
 /**
  * POST /api/auth/login
- * Iniciar sesión
  */
 router.post('/login', asyncHandler(async (req, res) => {
   const { email, password } = req.body;
@@ -143,34 +135,29 @@ router.post('/login', asyncHandler(async (req, res) => {
   if (!email || !password) {
     return res.status(400).json({
       success: false,
-      message: 'Email and password are required'
+      message: 'Email y contraseña son requeridos'
     });
   }
 
-  // Login con Supabase
-  const { data, error } = await supabase.auth.signInWithPassword({
-    email,
-    password
-  });
+  const { data, error } = await supabase.auth.signInWithPassword({ email, password });
 
   if (error) {
     return res.status(401).json({
       success: false,
-      message: 'Invalid credentials'
+      message: 'Credenciales inválidas'
     });
   }
 
-  // Obtener datos del usuario y suscripción
   const userResult = await query(
     'SELECT * FROM users WHERE id = $1',
     [data.user.id]
   );
 
-  // Obtener suscripción activa
   const subResult = await query(
-    `SELECT plan, status, trial_ends_at, apps_allowed, apps_created, token_limit, tokens_used
+    `SELECT plan, status, trial_ends_at, apps_allowed, apps_created, 
+            token_limit, tokens_used, domains_allowed, domains_used
      FROM subscriptions 
-     WHERE user_id = $1 AND status IN ('trial', 'active')
+     WHERE user_id = $1 AND status IN ('trial', 'active', 'past_due')
      ORDER BY created_at DESC LIMIT 1`,
     [data.user.id]
   );
@@ -184,9 +171,13 @@ router.post('/login', asyncHandler(async (req, res) => {
     trialDaysRemaining = Math.max(0, Math.ceil((trialEnds - now) / (1000 * 60 * 60 * 24)));
   }
 
+  // ✅ Si el trial venció y no tiene plan activo, indicar que debe elegir plan
+  const trialExpired = subscription?.status === 'trial' && trialDaysRemaining === 0;
+  const needsPlanSelection = !subscription || trialExpired;
+
   res.json({
     success: true,
-    message: 'Login successful',
+    message: 'Login exitoso',
     user: {
       id: data.user.id,
       email: data.user.email,
@@ -202,8 +193,11 @@ router.post('/login', asyncHandler(async (req, res) => {
       appsUsed: subscription?.apps_created || 0,
       appsAllowed: subscription?.apps_allowed || 1,
       tokensUsed: subscription?.tokens_used || 0,
-      tokensLimit: subscription?.token_limit || 10000
+      tokensLimit: subscription?.token_limit || 10000,
+      domainsAllowed: subscription?.domains_allowed || 0,
+      domainsUsed: subscription?.domains_used || 0
     },
+    needsPlanSelection,
     session: {
       accessToken: data.session.access_token,
       refreshToken: data.session.refresh_token,
@@ -214,47 +208,32 @@ router.post('/login', asyncHandler(async (req, res) => {
 
 /**
  * POST /api/auth/logout
- * Cerrar sesión
  */
 router.post('/logout', asyncHandler(async (req, res) => {
   const authHeader = req.headers.authorization;
   
   if (authHeader && authHeader.startsWith('Bearer ')) {
     const token = authHeader.substring(7);
-    
-    // Cerrar sesión en Supabase
     await supabase.auth.admin.signOut(token);
   }
 
-  res.json({
-    success: true,
-    message: 'Logged out successfully'
-  });
+  res.json({ success: true, message: 'Sesión cerrada correctamente' });
 }));
 
 /**
  * POST /api/auth/refresh
- * Refrescar token de acceso
  */
 router.post('/refresh', asyncHandler(async (req, res) => {
   const { refreshToken } = req.body;
 
   if (!refreshToken) {
-    return res.status(400).json({
-      success: false,
-      message: 'Refresh token is required'
-    });
+    return res.status(400).json({ success: false, message: 'Refresh token requerido' });
   }
 
-  const { data, error } = await supabase.auth.refreshSession({
-    refresh_token: refreshToken
-  });
+  const { data, error } = await supabase.auth.refreshSession({ refresh_token: refreshToken });
 
   if (error) {
-    return res.status(401).json({
-      success: false,
-      message: 'Invalid refresh token'
-    });
+    return res.status(401).json({ success: false, message: 'Token inválido o expirado' });
   }
 
   res.json({
@@ -269,60 +248,44 @@ router.post('/refresh', asyncHandler(async (req, res) => {
 
 /**
  * POST /api/auth/forgot-password
- * Solicitar reset de contraseña
  */
 router.post('/forgot-password', asyncHandler(async (req, res) => {
   const { email } = req.body;
 
   if (!email) {
-    return res.status(400).json({
-      success: false,
-      message: 'Email is required'
-    });
+    return res.status(400).json({ success: false, message: 'Email requerido' });
   }
 
   const { error } = await supabase.auth.resetPasswordForEmail(email, {
     redirectTo: `${process.env.CORS_ORIGIN}/reset-password`
   });
 
-  if (error) {
-    console.error('❌ Password reset error:', error);
-  }
+  if (error) console.error('❌ Password reset error:', error);
 
   res.json({
     success: true,
-    message: 'If that email exists, a password reset link has been sent'
+    message: 'Si ese email existe, recibirás un enlace para restablecer tu contraseña'
   });
 }));
 
 /**
  * POST /api/auth/reset-password
- * Resetear contraseña
  */
 router.post('/reset-password', asyncHandler(async (req, res) => {
   const { token, newPassword } = req.body;
 
   if (!token || !newPassword) {
-    return res.status(400).json({
-      success: false,
-      message: 'Token and new password are required'
-    });
+    return res.status(400).json({ success: false, message: 'Token y nueva contraseña son requeridos' });
   }
 
   if (newPassword.length < 6) {
-    return res.status(400).json({
-      success: false,
-      message: 'Password must be at least 6 characters'
-    });
+    return res.status(400).json({ success: false, message: 'La contraseña debe tener al menos 6 caracteres' });
   }
 
   const { data: { user }, error: getUserError } = await supabase.auth.getUser(token);
   
   if (getUserError || !user) {
-    return res.status(401).json({
-      success: false,
-      message: 'Invalid or expired reset token'
-    });
+    return res.status(401).json({ success: false, message: 'Token inválido o expirado' });
   }
 
   const { error: updateError } = await supabase.auth.admin.updateUserById(
@@ -331,16 +294,10 @@ router.post('/reset-password', asyncHandler(async (req, res) => {
   );
 
   if (updateError) {
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to update password'
-    });
+    return res.status(500).json({ success: false, message: 'Error al actualizar la contraseña' });
   }
 
-  res.json({
-    success: true,
-    message: 'Password updated successfully'
-  });
+  res.json({ success: true, message: 'Contraseña actualizada correctamente' });
 }));
 
 export default router;

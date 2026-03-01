@@ -9,7 +9,7 @@ import { query, transaction } from '../config/database.js';
 import { authenticate } from '../middleware/auth.js';
 import { generationRateLimiter } from '../middleware/rateLimiter.js';
 import { asyncHandler, AppError } from '../middleware/errorHandler.js';
-import { getUserSubscription, canCreateApp, incrementAppCount } from '../services/planService.js';
+import { getUserSubscription, canCreateApp, incrementAppCount, getUpgradeMessage } from '../services/planService.js';
 import { appGenerator } from '../services/appGenerator.js';
 
 const router = express.Router();
@@ -23,13 +23,13 @@ router.get('/', authenticate, asyncHandler(async (req, res) => {
   const offset = (page - 1) * limit;
 
   let queryText = `
-    SELECT a.*, 
+    SELECT a.*,
            COUNT(*) OVER() as total_count,
            (SELECT COUNT(*) FROM app_versions av WHERE av.app_id = a.id) as version_count
     FROM apps a
     WHERE a.user_id = $1
   `;
-  
+
   const params = [req.user.id];
 
   if (status) {
@@ -101,14 +101,28 @@ router.post('/create',
     const canCreate = await canCreateApp(req.user.id);
     if (!canCreate) {
       const sub = await getUserSubscription(req.user.id);
-      throw new AppError(
-        `Has alcanzado el límite de ${sub.apps_allowed} apps. Actualiza tu plan para seguir creando.`,
-        403
-      );
+      const appsAllowed = sub.apps_allowed || 1;
+      const currentPlan = sub.plan || 'free_trial';
+
+      // ✅ FIX: mensaje claro con plan sugerido y precio
+      return res.status(403).json({
+        success: false,
+        message: getUpgradeMessage(currentPlan, appsAllowed),
+        currentPlan,
+        appsAllowed,
+        appsCreated: sub.apps_created || 0,
+        upgradeRequired: true,
+        upgradeUrl: '/billing',
+        plans: {
+          basico: { price: 29.99, apps: 3, label: 'Básico' },
+          premium: { price: 49.99, apps: 8, label: 'Premium' },
+          pro: { price: 99.99, apps: 25, label: 'Pro' }
+        }
+      });
     }
 
     console.log(`🚀 Iniciando generación de app para usuario ${req.user.id}: "${name}"`);
-    console.log(`📋 Requiere pagos: ${requiresPayments ? 'SÍ' : 'NO'}`);
+    console.log(`📋 Requiere pagos: ${requiresPayments ? 'Sí' : 'NO'}`);
 
     try {
       // Usar el nuevo generador con validaciones
@@ -128,7 +142,7 @@ router.post('/create',
       // Si la generación fue exitosa pero con fallback
       if (result.fallbackUsed) {
         console.log(`⚠️ App ${result.app.id} generada con template de fallback`);
-        
+
         return res.status(202).json({
           success: true,
           message: 'Tu app está siendo preparada. Recibirás una notificación cuando esté lista.',
@@ -157,7 +171,7 @@ router.post('/create',
 
       // Éxito total
       console.log(`✅ App ${result.app.id} generada exitosamente en ${result.quality?.attempts || 1} intentos`);
-      
+
       res.status(202).json({
         success: true,
         message: 'App generation started',
@@ -171,7 +185,7 @@ router.post('/create',
 
     } catch (error) {
       console.error('❌ Error crítico en generación:', error);
-      
+
       // Crear app en estado de error para no perder el registro
       const appResult = await query(
         `INSERT INTO apps (user_id, name, description, prompt, tech_stack, status, error_details)

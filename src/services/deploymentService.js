@@ -166,7 +166,6 @@ export const deployDirectToVercel = async (appId, appName, code, envVars = {}) =
     const files = [];
     if (code.frontend?.files) {
       code.frontend.files.forEach(file => {
-        // ✅ FIX: asegurar que content es siempre string
         const content = typeof file.content === 'string'
           ? file.content
           : JSON.stringify(file.content);
@@ -258,6 +257,7 @@ export const deleteVercelDeployment = async (deploymentId) => {
   }
 };
 
+// ✅ FIX PRINCIPAL: usar alias público para URL final
 async function waitForDeployment(deploymentId, deploymentUrl, maxAttempts = 24) {
   console.log(`⏳ [VERCEL] Esperando deployment...`);
   let attempts = 0;
@@ -273,8 +273,11 @@ async function waitForDeployment(deploymentId, deploymentUrl, maxAttempts = 24) 
       console.log(`📊 [VERCEL] Estado: ${status.readyState} (${attempts + 1}/${maxAttempts})`);
 
       if (status.readyState === 'READY') {
-        const finalUrl = `https://${deploymentUrl}`;
-        console.log(`✅ [VERCEL] Completado: ${finalUrl}`);
+        // ✅ FIX: usar alias público si existe, sino URL directa
+        const finalUrl = (status.alias && status.alias.length > 0)
+          ? `https://${status.alias[0]}`
+          : `https://${status.url || deploymentUrl}`;
+        console.log(`✅ [VERCEL] URL final: ${finalUrl}`);
         return finalUrl;
       }
 
@@ -316,7 +319,6 @@ export const deployApp = async (appId, userId) => {
 
     const app = appResult.rows[0];
 
-    // ✅ FIX PRINCIPAL: parsear code si viene como string JSON
     let code = app.code;
     if (typeof code === 'string') {
       try {
@@ -622,7 +624,6 @@ function prepareFilesForBackup(code, appId, appName, version) {
 
   if (code.frontend?.files) {
     code.frontend.files.forEach(file => {
-      // ✅ FIX: asegurar que content es siempre string antes de Buffer
       const contentStr = typeof file.content === 'string'
         ? file.content
         : JSON.stringify(file.content);

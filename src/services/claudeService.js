@@ -1,6 +1,6 @@
 /**
  * Servicio de integración con Claude API
- * Usa streaming para evitar truncamiento en apps grandes
+ * Genera apps fullstack (frontend + backend) según complejidad
  */
 
 import Anthropic from '@anthropic-ai/sdk';
@@ -8,6 +8,23 @@ import Anthropic from '@anthropic-ai/sdk';
 const anthropic = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY
 });
+
+// Palabras clave que indican que se necesita backend
+const BACKEND_KEYWORDS = [
+  'marketplace', 'tienda', 'ecommerce', 'e-commerce', 'shop', 'store',
+  'pagos', 'payment', 'stripe', 'checkout',
+  'base de datos', 'database', 'usuarios', 'users', 'registro', 'login', 'auth',
+  'admin', 'panel', 'dashboard', 'reportes', 'reports',
+  'inventario', 'inventory', 'ordenes', 'orders', 'pedidos',
+  'api', 'backend', 'servidor', 'server',
+  'qr', 'codigo qr', 'verificacion',
+  'notificaciones', 'email', 'sms',
+  'logistica', 'envio', 'shipping',
+  'comision', 'vendedor', 'seller', 'comprador', 'buyer',
+  'chat', 'mensajes', 'messages', 'tiempo real', 'real time',
+  'roles', 'permisos', 'permissions',
+  'upload', 'archivos', 'files', 'imagenes', 'images'
+];
 
 class ClaudeService {
 
@@ -24,6 +41,12 @@ class ClaudeService {
     const match = text.match(/```(?:jsx?|tsx?|javascript)?\n?([\s\S]*?)```/);
     const code = match ? match[1].trim() : text.trim();
     return this.sanitizeCode(code);
+  }
+
+  // Detectar si la app necesita backend
+  needsBackend(description) {
+    const desc = description.toLowerCase();
+    return BACKEND_KEYWORDS.some(keyword => desc.includes(keyword));
   }
 
   async generateWithStreaming(systemPrompt, userMessage) {
@@ -54,36 +77,36 @@ class ClaudeService {
     return { text: fullText, tokens: inputTokens + outputTokens };
   }
 
-  async generateApp(description, options = {}) {
-    try {
-      const { style, colors, googleApis, requiresPayments, stripePriceIds } = options;
+  // ─────────────────────────────────────────
+  // GENERAR FRONTEND (React SPA)
+  // ─────────────────────────────────────────
+  async generateFrontend(description, options = {}) {
+    const { style, colors, googleApis, requiresPayments, isFullstack, apiBaseUrl } = options;
 
-      const colorBlock = colors ? `
-PRIMARY COLOR (buttons, headers, key elements): ${colors.primary}
-SECONDARY COLOR (hover states, borders): ${colors.secondary}
-ACCENT COLOR (badges, highlights, CTAs): ${colors.accent}
-BACKGROUND (page background): ${colors.background}
-SURFACE (cards, panels, sidebars): ${colors.surface}
-TEXT COLOR (main text): ${colors.text}
+    const colorBlock = colors ? `
+PRIMARY COLOR: ${colors.primary}
+SECONDARY COLOR: ${colors.secondary}
+ACCENT COLOR: ${colors.accent}
+BACKGROUND: ${colors.background}
+SURFACE: ${colors.surface}
+TEXT COLOR: ${colors.text}
 Apply these colors using style={{}} inline throughout the entire app.` : '';
 
-      const systemPrompt = `You are a world-class React developer and UI/UX designer. Generate a stunning, modern, professional web application — NOT a basic HTML page.
+    const systemPrompt = `You are a world-class React developer and UI/UX designer. Generate a stunning, modern, professional web application.
 
-DESIGN REQUIREMENTS (mandatory - this is the most important part):
+DESIGN REQUIREMENTS (mandatory):
 - Must look like a premium SaaS product or professional web app
 - Beautiful navigation: logo + menu items + action button, with shadow
 - Hero section with gradient background using the primary color
-- Cards with depth: use boxShadow, borderRadius 12-16px, hover effects
-- Rich typography hierarchy: large bold titles (2-3rem), clear subtitles, body text
+- Cards with depth: boxShadow, borderRadius 12-16px, hover effects
+- Rich typography hierarchy: large bold titles (2-3rem), clear subtitles
 - Gradient backgrounds on hero and key sections
-- Color-coded badges and status chips (rounded-full, small padding)
-- Smooth transitions on all interactive elements (transition: 'all 0.2s ease')
+- Color-coded badges and status chips
+- Smooth transitions on all interactive elements
 - Grid/flex layouts for data — never plain vertical lists
 - At least 5-8 realistic mock data items per section
-- Beautiful empty states and action buttons
 - Sidebar layout OR top nav depending on app type
-- Icons using emoji where appropriate (🏠 📊 ✅ 🚀 etc)
-- Section dividers, proper spacing, visual hierarchy
+- Icons using emoji where appropriate
 
 STYLE THEME: ${style || 'modern'}
 ${colorBlock}
@@ -92,39 +115,132 @@ TECHNICAL RULES:
 - Single file React component
 - Start with: import React, { useState, useEffect } from 'react'
 - End with closing } of App function — NEVER leave it open
-- Use style={{}} for the custom colors listed above
-- Use Tailwind for layout, spacing, typography (flex, grid, p-4, text-xl, etc)
-- CRITICAL: NEVER put accented chars (á,é,í,ó,ú,ñ) inside JS template literals or backtick strings
-- Accented chars ONLY inside JSX text nodes: <span>Información</span> is OK
-- Accented chars inside backticks: FORBIDDEN. Convert to plain text in JSX instead
+- Use style={{}} for custom colors
+- Use Tailwind for layout, spacing, typography
+- CRITICAL: NEVER put accented chars inside JS template literals or backtick strings
+- Accented chars ONLY inside JSX text nodes
 - All JSX tags must be properly closed
-- All template literals must be properly closed
-${googleApis?.length ? `- Integrate Google APIs: ${googleApis.join(', ')}${googleApis.includes('Maps') || googleApis.includes('maps') ? `\n- For Google Maps: the API is already loaded via script tag in index.html. Use window.google.maps directly. Do NOT add another script tag. Example: new window.google.maps.Map(ref.current, { center: { lat: 40.7128, lng: -74.0060 }, zoom: 12 })` : ''}` : ''}
-${requiresPayments ? `- PAYMENTS: Stripe is already loaded via script tag in index.html (Stripe.js v3). Use it like this: const stripe = window.Stripe(\'${process.env.STRIPE_PUBLISHABLE_KEY || 'pk_test_YOUR_KEY'}\'); - Create checkout buttons that call your backend /api/stripe/create-checkout - Show plan prices and a checkout button per plan - Handle success/cancel redirects` : ''}
+${isFullstack ? `- This app connects to a REST API at ${apiBaseUrl || 'http://localhost:4000/api'}
+- Use fetch() for all data operations (GET, POST, PUT, DELETE)
+- Show loading states while fetching
+- Handle API errors gracefully with error messages
+- Use useEffect to load data on mount
+- Include JWT token in headers: Authorization: Bearer token (get from localStorage)
+- Show login/register forms that call the API
+- After login, store token in localStorage and show authenticated UI` : ''}
+${googleApis?.length ? `- Integrate Google APIs: ${googleApis.join(', ')}` : ''}
+${requiresPayments ? `- PAYMENTS: Stripe is loaded via script tag. Use window.Stripe('${process.env.STRIPE_PUBLISHABLE_KEY || 'pk_test_YOUR_KEY'}')` : ''}
 
-Respond with ONLY the code. No markdown fences, no explanations. Start directly with: import React`;
+Respond with ONLY the React code. No markdown, no explanations. Start with: import React`;
 
-      console.log('🌊 Generando con streaming...');
+    const result = await this.generateWithStreaming(systemPrompt, description);
+    return { text: result.text, tokens: result.tokens };
+  }
+
+  // ─────────────────────────────────────────
+  // GENERAR BACKEND (Express + Node.js)
+  // ─────────────────────────────────────────
+  async generateBackend(description, options = {}) {
+    const { requiresPayments, googleApis } = options;
+
+    const systemPrompt = `You are an expert Node.js/Express backend developer. Generate a complete, production-ready Express.js backend API.
+
+REQUIREMENTS:
+- Use Express.js with ES modules (import/export)
+- Include all necessary routes for the described app
+- Use JWT for authentication (jsonwebtoken package)
+- Include middleware: cors, express.json, authentication
+- Use in-memory storage (Map/Array) — no database setup needed for now
+- Include proper error handling
+- All routes must be RESTful
+- Include CORS headers for frontend at http://localhost:3000
+${requiresPayments ? `- Include Stripe integration for payments
+- Use Stripe secret key from process.env.STRIPE_SECRET_KEY
+- Include webhook handling` : ''}
+
+STRUCTURE — generate a SINGLE server.js file with:
+1. All imports at top
+2. Express app setup with CORS and JSON middleware
+3. In-memory data stores (const users = new Map(), etc)
+4. Auth routes: POST /api/auth/register, POST /api/auth/login
+5. All business logic routes based on the app description
+6. JWT auth middleware function
+7. Protected routes using the middleware
+8. app.listen(4000) at the bottom
+
+CRITICAL RULES:
+- Single file: server.js
+- ES modules syntax (import, export)  
+- Start with: import express from 'express'
+- End with: app.listen(4000, ...)
+- No TypeScript, no database imports
+- Include sample/seed data in the in-memory stores
+- All endpoints must return JSON
+
+Respond with ONLY the server.js code. No markdown, no explanations. Start with: import express`;
+
+    const result = await this.generateWithStreaming(systemPrompt, `Generate a complete backend API for this app:\n\n${description}`);
+    return { text: result.text, tokens: result.tokens };
+  }
+
+  // ─────────────────────────────────────────
+  // MÉTODO PRINCIPAL
+  // ─────────────────────────────────────────
+  async generateApp(description, options = {}) {
+    try {
+      const { style, colors, googleApis, requiresPayments, stripePriceIds } = options;
+      const isFullstack = this.needsBackend(description);
+
+      console.log(`🔍 Tipo de app: ${isFullstack ? 'FULLSTACK (frontend + backend)' : 'FRONTEND solo'}`);
+      console.log(`🌊 Generando con streaming...`);
       const startTime = Date.now();
 
-      const result = await this.generateWithStreaming(systemPrompt, description);
+      let frontendCode, backendCode, totalTokens = 0;
 
-      const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-      console.log(`✅ Streaming completado en ${elapsed}s - ${result.text.length} chars, ${result.tokens} tokens`);
+      if (isFullstack) {
+        // Generar frontend y backend en paralelo
+        console.log('⚙️ Generando frontend y backend en paralelo...');
+        const [frontendResult, backendResult] = await Promise.all([
+          this.generateFrontend(description, { style, colors, googleApis, requiresPayments, isFullstack: true }),
+          this.generateBackend(description, { requiresPayments, googleApis })
+        ]);
 
-      const code = this.extractCode(result.text);
+        frontendCode = this.extractCode(frontendResult.text);
+        backendCode = this.extractCode(backendResult.text);
+        totalTokens = frontendResult.tokens + backendResult.tokens;
 
-      if (!code.includes('export default') || code.length < 200) {
-        console.error('❌ Código inválido o muy corto');
-        return { success: false, error: 'Codigo generado invalido' };
+        console.log(`✅ Frontend: ${frontendCode.split('\n').length} líneas`);
+        console.log(`✅ Backend: ${backendCode.split('\n').length} líneas`);
+      } else {
+        // Solo frontend
+        const frontendResult = await this.generateFrontend(description, { style, colors, googleApis, requiresPayments, isFullstack: false });
+        frontendCode = this.extractCode(frontendResult.text);
+        totalTokens = frontendResult.tokens;
+
+        console.log(`✅ Frontend: ${frontendCode.split('\n').length} líneas`);
       }
 
-      console.log(`✅ Código listo: ${code.split('\n').length} líneas`);
+      const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+      console.log(`✅ Generación completada en ${elapsed}s — ${totalTokens} tokens`);
+
+      // Validar frontend
+      if (!frontendCode.includes('export default') || frontendCode.length < 200) {
+        console.error('❌ Frontend inválido o muy corto');
+        return { success: false, error: 'Codigo frontend invalido' };
+      }
+
+      // Validar backend si aplica
+      if (isFullstack && (!backendCode || backendCode.length < 100)) {
+        console.warn('⚠️ Backend inválido, continuando solo con frontend');
+        isFullstack = false;
+      }
 
       return {
         success: true,
-        code,
-        tokensUsed: result.tokens
+        code: frontendCode,
+        backendCode: isFullstack ? backendCode : null,
+        isFullstack,
+        tokensUsed: totalTokens
       };
 
     } catch (error) {

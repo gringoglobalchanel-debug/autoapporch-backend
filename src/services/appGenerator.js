@@ -1,5 +1,6 @@
 /**
  * Servicio principal de generación de apps
+ * Soporte fullstack: frontend React + backend Express
  */
 
 import claudeService from './claudeService.js';
@@ -26,9 +27,9 @@ export class AppGenerator {
         throw new Error(`Claude falló: ${claudeResult.error}`);
       }
 
-      const app = await this.saveApp(userId, appData, claudeResult.code, claudeResult);
+      const app = await this.saveApp(userId, appData, claudeResult);
 
-      // Si la app necesita pagos y el usuario tiene Stripe Connect, crear productos automáticamente
+      // Si la app necesita pagos y el usuario tiene Stripe Connect
       if (appData.requiresPayments && appData.stripeProducts?.length > 0) {
         console.log("💳 Creando productos en Stripe para app:", app.id);
         try {
@@ -47,10 +48,9 @@ export class AppGenerator {
               `UPDATE apps SET stripe_account_id = $1, stripe_products = $2, stripe_price_ids = $3 WHERE id = $4`,
               [stripeAccountId, JSON.stringify(created), JSON.stringify(created.map(p => p.price_id)), app.id]
             );
-            console.log(`✅ ${created.length} productos Stripe creados para app ${app.id}`);
+            console.log(`✅ ${created.length} productos Stripe creados`);
             app.stripeProducts = created;
           } else {
-            console.log('⚠️ Usuario sin Stripe Connect activo, productos no creados');
             app.needsStripeConnect = true;
           }
         } catch (stripeError) {
@@ -58,7 +58,8 @@ export class AppGenerator {
         }
       }
 
-      return { success: true, app };
+      console.log(`✅ App generada: ${app.id} — ${claudeResult.isFullstack ? 'FULLSTACK' : 'FRONTEND'}`);
+      return { success: true, app, isFullstack: claudeResult.isFullstack };
 
     } catch (error) {
       console.error(`❌ Error en generación:`, error);
@@ -66,7 +67,7 @@ export class AppGenerator {
     }
   }
 
-  async saveApp(userId, appData, code, claudeResult) {
+  async saveApp(userId, appData, claudeResult) {
     return await transaction(async (client) => {
       const appResult = await client.query(
         `INSERT INTO apps (
@@ -79,7 +80,11 @@ export class AppGenerator {
           appData.name,
           appData.description,
           appData.description,
-          JSON.stringify({ style: appData.style, colors: appData.colors }),
+          JSON.stringify({
+            style: appData.style,
+            colors: appData.colors,
+            isFullstack: claudeResult.isFullstack || false
+          }),
           'ready',
           appData.googleApis || [],
           appData.requiresPayments || false,
@@ -88,7 +93,15 @@ export class AppGenerator {
       );
 
       const app = appResult.rows[0];
-      const fullProject = this.createProjectStructure(appData.name, code, appData.googleApis || [], appData.requiresPayments || false);
+
+      // Construir estructura de proyecto completa (frontend + backend si aplica)
+      const fullProject = this.createProjectStructure(
+        appData.name,
+        claudeResult.code,
+        appData.googleApis || [],
+        appData.requiresPayments || false,
+        claudeResult.backendCode || null
+      );
 
       await client.query(
         `INSERT INTO app_versions (app_id, version, code, generation_prompt, generation_time_ms, tokens_used)
@@ -105,70 +118,72 @@ export class AppGenerator {
     });
   }
 
-  createProjectStructure(appName, appCode, googleApis = [], requiresPayments = false) {
-    return {
-      frontend: {
-        files: [
-          {
-            path: 'package.json',
-            content: JSON.stringify({
-              name: appName.toLowerCase().replace(/\s+/g, '-'),
-              version: '1.0.0',
-              type: 'module',
-              scripts: {
-                dev: 'vite',
-                build: 'vite build',
-                preview: 'vite preview'
-              },
-              dependencies: {
-                react: '^18.2.0',
-                'react-dom': '^18.2.0'
-              },
-              devDependencies: {
-                vite: '^5.0.0',
-                '@vitejs/plugin-react': '^4.2.0',
-                tailwindcss: '^3.4.0',
-                autoprefixer: '^10.4.0',
-                postcss: '^8.4.0'
-              }
-            }, null, 2)
+  createProjectStructure(appName, frontendCode, googleApis = [], requiresPayments = false, backendCode = null) {
+    const slug = appName.toLowerCase().replace(/\s+/g, '-');
+    const isFullstack = !!backendCode;
+
+    const frontendFiles = [
+      {
+        path: 'package.json',
+        content: JSON.stringify({
+          name: slug,
+          version: '1.0.0',
+          type: 'module',
+          scripts: {
+            dev: 'vite',
+            build: 'vite build',
+            preview: 'vite preview'
           },
-          {
-            path: 'vite.config.js',
-            content: `import { defineConfig } from 'vite'
+          dependencies: {
+            react: '^18.2.0',
+            'react-dom': '^18.2.0'
+          },
+          devDependencies: {
+            vite: '^5.0.0',
+            '@vitejs/plugin-react': '^4.2.0',
+            tailwindcss: '^3.4.0',
+            autoprefixer: '^10.4.0',
+            postcss: '^8.4.0'
+          }
+        }, null, 2)
+      },
+      {
+        path: 'vite.config.js',
+        content: `import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
 export default defineConfig({
   plugins: [react()],
-  server: { port: 3000, open: true }
+  server: {
+    port: 3000,
+    open: true,
+    proxy: {
+      '/api': {
+        target: 'http://localhost:4000',
+        changeOrigin: true
+      }
+    }
+  }
 })`
-          },
-          {
-            path: 'tailwind.config.js',
-            content: `/** @type {import('tailwindcss').Config} */
+      },
+      {
+        path: 'tailwind.config.js',
+        content: `/** @type {import('tailwindcss').Config} */
 export default {
-  content: [
-    "./index.html",
-    "./src/**/*.{js,ts,jsx,tsx}",
-  ],
-  theme: {
-    extend: {},
-  },
+  content: ["./index.html", "./src/**/*.{js,ts,jsx,tsx}"],
+  theme: { extend: {} },
   plugins: [],
 }`
-          },
-          {
-            path: 'postcss.config.js',
-            content: `export default {
-  plugins: {
-    tailwindcss: {},
-    autoprefixer: {},
-  },
+      },
+      {
+        path: 'postcss.config.js',
+        content: `export default {
+  plugins: { tailwindcss: {}, autoprefixer: {} },
 }`
-          },
-          {
-            path: 'index.html',
-            content: `<!DOCTYPE html>
+      },
+      {
+        path: 'index.html',
+        content: `<!DOCTYPE html>
 <html lang="es">
   <head>
     <meta charset="UTF-8" />
@@ -185,10 +200,10 @@ export default {
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>`
-          },
-          {
-            path: 'src/main.jsx',
-            content: `import React from 'react'
+      },
+      {
+        path: 'src/main.jsx',
+        content: `import React from 'react'
 import ReactDOM from 'react-dom/client'
 import App from './App'
 import './index.css'
@@ -198,50 +213,151 @@ ReactDOM.createRoot(document.getElementById('root')).render(
     <App />
   </React.StrictMode>
 )`
-          },
-          {
-            path: 'src/index.css',
-            content: `@tailwind base;
+      },
+      {
+        path: 'src/index.css',
+        content: `@tailwind base;
 @tailwind components;
 @tailwind utilities;
 
-* {
-  box-sizing: border-box;
-}
+* { box-sizing: border-box; }
 
 body {
   margin: 0;
   font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
 }
 
-/* Smooth scrolling */
-html {
-  scroll-behavior: smooth;
-}
+html { scroll-behavior: smooth; }
 
-/* Custom scrollbar */
-::-webkit-scrollbar {
-  width: 6px;
-}
-::-webkit-scrollbar-track {
-  background: #f1f5f9;
-}
-::-webkit-scrollbar-thumb {
-  background: #cbd5e1;
-  border-radius: 3px;
-}
-::-webkit-scrollbar-thumb:hover {
-  background: #94a3b8;
-}`
-          },
-          {
-            path: 'src/App.jsx',
-            content: appCode
-          }
-        ]
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: #f1f5f9; }
+::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #94a3b8; }`
+      },
+      {
+        path: 'src/App.jsx',
+        content: frontendCode
       }
+    ];
+
+    // ─── BACKEND FILES ───────────────────────────────────────
+    const backendFiles = isFullstack ? [
+      {
+        path: 'backend/package.json',
+        content: JSON.stringify({
+          name: `${slug}-backend`,
+          version: '1.0.0',
+          type: 'module',
+          main: 'server.js',
+          scripts: {
+            start: 'node server.js',
+            dev: 'nodemon server.js'
+          },
+          dependencies: {
+            express: '^4.18.2',
+            cors: '^2.8.5',
+            jsonwebtoken: '^9.0.2',
+            bcryptjs: '^2.4.3',
+            ...(requiresPayments ? { stripe: '^14.0.0' } : {}),
+            dotenv: '^16.3.1',
+            ...(googleApis?.some(a => a.toLowerCase().includes('mail') || a.toLowerCase().includes('email'))
+              ? { nodemailer: '^6.9.7' }
+              : {}),
+            qrcode: '^1.5.3',
+            uuid: '^9.0.0'
+          },
+          devDependencies: {
+            nodemon: '^3.0.2'
+          }
+        }, null, 2)
+      },
+      {
+        path: 'backend/.env.example',
+        content: `PORT=4000
+JWT_SECRET=your_jwt_secret_here_change_in_production
+${requiresPayments ? 'STRIPE_SECRET_KEY=sk_test_YOUR_KEY\nSTRIPE_PUBLISHABLE_KEY=pk_test_YOUR_KEY\nSTRIPE_WEBHOOK_SECRET=whsec_YOUR_SECRET\n' : ''}FRONTEND_URL=http://localhost:3000
+`
+      },
+      {
+        path: 'backend/server.js',
+        content: backendCode
+      },
+      {
+        path: 'backend/README.md',
+        content: `# ${appName} - Backend
+
+## Setup
+
+\`\`\`bash
+cd backend
+npm install
+cp .env.example .env
+# Edit .env with your values
+npm run dev
+\`\`\`
+
+## API runs on http://localhost:4000
+
+## Endpoints
+- POST /api/auth/register
+- POST /api/auth/login
+- GET  /api/auth/me
+- (All other routes generated for this specific app)
+`
+      }
+    ] : [];
+
+    // ─── README RAÍZ ───────────────────────────────────────
+    const rootFiles = [
+      {
+        path: 'README.md',
+        content: `# ${appName}
+
+${isFullstack ? `## Arquitectura
+- **Frontend**: React + Vite + TailwindCSS (puerto 3000)
+- **Backend**: Express.js + Node.js (puerto 4000)
+
+## Instrucciones
+
+### 1. Instalar y ejecutar el backend
+\`\`\`bash
+cd backend
+npm install
+cp .env.example .env
+# Edita .env con tus valores reales
+npm run dev
+\`\`\`
+
+### 2. Instalar y ejecutar el frontend
+\`\`\`bash
+npm install
+npm run dev
+\`\`\`
+
+### 3. Abrir en el navegador
+- Frontend: http://localhost:3000
+- API: http://localhost:4000/api
+` : `## Instrucciones
+
+\`\`\`bash
+npm install
+npm run dev
+\`\`\`
+
+Abre http://localhost:3000
+`}
+
+## Generado con AutoAppOrchestrator 🚀
+`
+      }
+    ];
+
+    return {
+      isFullstack,
+      frontend: { files: frontendFiles },
+      ...(isFullstack ? { backend: { files: backendFiles } } : {}),
+      root: { files: rootFiles }
     };
   }
 
@@ -274,7 +390,7 @@ export default function App() {
           ${appData.name}
         </h1>
         <p style={{ fontSize: '1.1rem', color: '#64748b', marginBottom: '2rem' }}>
-          ${appData.description || 'Tu aplicacion esta siendo preparada'}
+          Tu aplicacion esta siendo preparada
         </p>
         <div style={{
           padding: '1rem 2rem',
@@ -290,9 +406,16 @@ export default function App() {
   );
 }`;
 
-    const fallbackProject = this.createProjectStructure(appData.name, fallbackCode);
-    const app = await this.saveApp(userId, appData, fallbackProject, { duration: 0, tokensUsed: 0 });
+    const fallbackResult = {
+      success: true,
+      code: fallbackCode,
+      backendCode: null,
+      isFullstack: false,
+      duration: 0,
+      tokensUsed: 0
+    };
 
+    const app = await this.saveApp(userId, appData, fallbackResult);
     return { success: true, app, fallbackUsed: true };
   }
 }

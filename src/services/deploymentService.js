@@ -11,6 +11,115 @@ import fetch from 'node-fetch';
 const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });
 
 // ═══════════════════════════════════════════════════════════════════
+// 🔧 UTILIDAD CRÍTICA: Normalizar código desde DB
+// El código en DB puede estar en varios formatos:
+//   1. { frontend: { files: [...] } }  ← formato correcto
+//   2. JSON string del formato anterior
+//   3. El JSON completo guardado como string en App.jsx (BUG)
+// ═══════════════════════════════════════════════════════════════════
+
+function normalizeCode(rawCode) {
+  // Si es string, intentar parsear
+  if (typeof rawCode === 'string') {
+    try {
+      rawCode = JSON.parse(rawCode);
+    } catch (e) {
+      // Es código React directo (string puro)
+      return buildFrontendStructure(rawCode);
+    }
+  }
+
+  // Si ya tiene estructura correcta con frontend.files
+  if (rawCode?.frontend?.files) {
+    // Verificar que App.jsx no tenga JSON como contenido
+    const appFile = rawCode.frontend.files.find(f => f.path === 'src/App.jsx');
+    if (appFile) {
+      const content = appFile.content;
+      if (typeof content === 'string' && content.trim().startsWith('{')) {
+        try {
+          const parsed = JSON.parse(content);
+          if (parsed?.frontend?.files) {
+            console.log('🔧 [FIX] App.jsx contenía JSON anidado, extrayendo código real...');
+            return normalizeCode(parsed);
+          }
+        } catch (e) {
+          // No era JSON válido, usar como está
+        }
+      }
+    }
+    return rawCode;
+  }
+
+  // Si tiene estructura de archivos directamente (array)
+  if (Array.isArray(rawCode?.files)) {
+    return { frontend: { files: rawCode.files } };
+  }
+
+  // Si el objeto raíz ES el JSON del proyecto completo anidado
+  if (rawCode?.frontend) {
+    return rawCode;
+  }
+
+  // Fallback: envolver como frontend
+  console.warn('⚠️ [NORMALIZE] Formato desconocido, usando fallback');
+  return buildFrontendStructure(JSON.stringify(rawCode));
+}
+
+function buildFrontendStructure(appCode) {
+  return {
+    frontend: {
+      files: [
+        {
+          path: 'package.json',
+          content: JSON.stringify({
+            name: 'app',
+            version: '1.0.0',
+            type: 'module',
+            scripts: { dev: 'vite', build: 'vite build', preview: 'vite preview' },
+            dependencies: { react: '^18.2.0', 'react-dom': '^18.2.0' },
+            devDependencies: {
+              vite: '^5.0.0',
+              '@vitejs/plugin-react': '^4.2.0',
+              tailwindcss: '^3.4.0',
+              autoprefixer: '^10.4.0',
+              postcss: '^8.4.0'
+            }
+          }, null, 2)
+        },
+        {
+          path: 'vite.config.js',
+          content: `import { defineConfig } from 'vite'\nimport react from '@vitejs/plugin-react'\nexport default defineConfig({ plugins: [react()], server: { port: 3000 } })`
+        },
+        {
+          path: 'tailwind.config.js',
+          content: `export default { content: ['./index.html', './src/**/*.{js,ts,jsx,tsx}'], theme: { extend: {} }, plugins: [] }`
+        },
+        {
+          path: 'postcss.config.js',
+          content: `export default { plugins: { tailwindcss: {}, autoprefixer: {} } }`
+        },
+        {
+          path: 'index.html',
+          content: `<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1.0"/><title>App</title><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet"/></head><body><div id="root"></div><script type="module" src="/src/main.jsx"></script></body></html>`
+        },
+        {
+          path: 'src/main.jsx',
+          content: `import React from 'react'\nimport ReactDOM from 'react-dom/client'\nimport App from './App'\nimport './index.css'\nReactDOM.createRoot(document.getElementById('root')).render(<React.StrictMode><App /></React.StrictMode>)`
+        },
+        {
+          path: 'src/index.css',
+          content: `@tailwind base;\n@tailwind components;\n@tailwind utilities;\n* { box-sizing: border-box; }\nbody { margin: 0; font-family: 'Inter', sans-serif; }`
+        },
+        {
+          path: 'src/App.jsx',
+          content: appCode
+        }
+      ]
+    }
+  };
+}
+
+// ═══════════════════════════════════════════════════════════════════
 // 1️⃣ GITHUB BACKUP
 // ═══════════════════════════════════════════════════════════════════
 
@@ -31,7 +140,8 @@ export const createGitHubBackup = async (appId, appName, code, version = 1) => {
     console.log(`✅ [BACKUP] Repositorio creado: ${repo.data.html_url}`);
     await new Promise(resolve => setTimeout(resolve, 3000));
 
-    const files = prepareFilesForBackup(code, appId, appName, version);
+    const normalizedCode = normalizeCode(code);
+    const files = prepareFilesForBackup(normalizedCode, appId, appName, version);
     const { data: repoData } = await octokit.repos.get({
       owner: process.env.GITHUB_USERNAME,
       repo: repoName
@@ -79,7 +189,8 @@ export const updateGitHubBackup = async (repoName, code, version) => {
     });
 
     const defaultBranch = repoData.default_branch;
-    const files = prepareFilesForBackup(code, null, null, version);
+    const normalizedCode = normalizeCode(code);
+    const files = prepareFilesForBackup(normalizedCode, null, null, version);
 
     for (const file of files) {
       try {
@@ -139,7 +250,7 @@ export const getVersionCode = async (repoName, version) => {
   try {
     console.log(`📥 [ROLLBACK] Obteniendo código de ${version}`);
     const files = await getFilesFromRepo(repoName, version);
-    
+
     return {
       success: true,
       code: {
@@ -163,18 +274,47 @@ export const deployDirectToVercel = async (appId, appName, code, envVars = {}) =
     const projectName = `app-${appId.substring(0, 8)}-${Date.now().toString().slice(-6)}`.toLowerCase();
     console.log(`🚀 [VERCEL] Deploy: ${projectName}`);
 
+    // ✅ CRÍTICO: Normalizar código antes de construir archivos
+    const normalizedCode = normalizeCode(code);
+    console.log(`📋 [VERCEL] Archivos frontend: ${normalizedCode.frontend?.files?.length || 0}`);
+
     const files = [];
-    if (code.frontend?.files) {
-      code.frontend.files.forEach(file => {
-        const content = typeof file.content === 'string'
-          ? file.content
-          : JSON.stringify(file.content);
+    if (normalizedCode.frontend?.files) {
+      normalizedCode.frontend.files.forEach(file => {
+        let content = file.content;
+
+        // Si el contenido es un objeto/array, convertir a string
+        if (typeof content !== 'string') {
+          content = JSON.stringify(content, null, 2);
+        }
+
+        // ✅ CRÍTICO: Verificar que App.jsx no sea JSON del proyecto
+        if (file.path === 'src/App.jsx' && content.trim().startsWith('{')) {
+          try {
+            const parsed = JSON.parse(content);
+            if (parsed?.frontend || parsed?.files || parsed?.frontend?.files) {
+              console.error('❌ [VERCEL] App.jsx contiene JSON de proyecto, usando fallback');
+              content = `import React from 'react';\nexport default function App() {\n  return (\n    <div style={{padding:'2rem',textAlign:'center',fontFamily:'Inter,sans-serif'}}>\n      <h1 style={{fontSize:'2rem',color:'#1e293b'}}>App generada</h1>\n      <p style={{color:'#64748b'}}>El contenido se está procesando...</p>\n    </div>\n  );\n}`;
+            }
+          } catch (e) {
+            // No era JSON, usar como está
+          }
+        }
 
         files.push({
           file: file.path,
           data: content
         });
+
+        // Log preview de App.jsx para debug
+        if (file.path === 'src/App.jsx') {
+          console.log(`📝 [VERCEL] App.jsx preview: ${content.substring(0, 80)}...`);
+        }
       });
+    }
+
+    if (files.length === 0) {
+      throw new Error('No files to deploy');
     }
 
     const deployPayload = {
@@ -257,7 +397,6 @@ export const deleteVercelDeployment = async (deploymentId) => {
   }
 };
 
-// ✅ FIX PRINCIPAL: usar alias público para URL final
 async function waitForDeployment(deploymentId, deploymentUrl, maxAttempts = 24) {
   console.log(`⏳ [VERCEL] Esperando deployment...`);
   let attempts = 0;
@@ -273,7 +412,6 @@ async function waitForDeployment(deploymentId, deploymentUrl, maxAttempts = 24) 
       console.log(`📊 [VERCEL] Estado: ${status.readyState} (${attempts + 1}/${maxAttempts})`);
 
       if (status.readyState === 'READY') {
-        // ✅ FIX: usar alias público si existe, sino URL directa
         const finalUrl = (status.alias && status.alias.length > 0)
           ? `https://${status.alias[0]}`
           : `https://${status.url || deploymentUrl}`;
@@ -307,7 +445,7 @@ export const deployApp = async (appId, userId) => {
     console.log(`\n🎯 ===== DEPLOY INICIAL: ${appId} =====\n`);
 
     const appResult = await query(
-      `SELECT a.*, av.code, av.version 
+      `SELECT a.*, av.code, av.version
        FROM apps a
        JOIN app_versions av ON a.id = av.app_id
        WHERE a.id = $1 AND a.user_id = $2
@@ -331,6 +469,9 @@ export const deployApp = async (appId, userId) => {
 
     if (!code) throw new Error('No code found');
 
+    // ✅ Normalizar antes de todo
+    code = normalizeCode(code);
+
     await query(
       `UPDATE apps SET deployment_status = 'deploying', updated_at = NOW() WHERE id = $1`,
       [appId]
@@ -351,7 +492,7 @@ export const deployApp = async (appId, userId) => {
     if (!deploy.success) throw new Error(`Vercel deployment failed: ${deploy.error}`);
 
     await query(
-      `UPDATE apps 
+      `UPDATE apps
        SET deployed = TRUE,
            deploy_url = $1,
            deployment_status = 'deployed',
@@ -414,6 +555,8 @@ export const updateApp = async (appId, userId, newCode, updateDescription = '') 
     versionParts[1] = parseInt(versionParts[1]) + 1;
     const newVersion = `v${versionParts.join('.')}`;
 
+    newCode = normalizeCode(newCode);
+
     console.log(`📊 Versión actual: ${currentVersion} → Nueva: ${newVersion}`);
     await query(`UPDATE apps SET deployment_status = 'updating', updated_at = NOW() WHERE id = $1`, [appId]);
 
@@ -450,9 +593,6 @@ export const updateApp = async (appId, userId, newCode, updateDescription = '') 
     );
 
     console.log(`\n✅ ===== ACTUALIZACIÓN COMPLETADA =====`);
-    console.log(`📦 Versión: ${newVersion}`);
-    console.log(`🌐 Production: ${deploy.url}\n`);
-
     return { success: true, version: newVersion, deployUrl: deploy.url, deploymentId: deploy.deploymentId };
 
   } catch (error) {
@@ -481,11 +621,9 @@ export const rollbackApp = async (appId, userId, targetVersion) => {
     const app = appResult.rows[0];
     await query(`UPDATE apps SET deployment_status = 'rolling_back', updated_at = NOW() WHERE id = $1`, [appId]);
 
-    console.log(`\n📥 PASO 1/2: Obteniendo código de ${targetVersion}...\n`);
     const versionCode = await getVersionCode(app.github_repo_name, targetVersion);
     if (!versionCode.success) throw new Error(`Failed to get version code: ${versionCode.error}`);
 
-    console.log(`\n🚀 PASO 2/2: Desplegando ${targetVersion}...\n`);
     const envVars = {
       VITE_SUPABASE_URL: process.env.SUPABASE_URL,
       VITE_SUPABASE_ANON_KEY: process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_KEY,
@@ -505,17 +643,12 @@ export const rollbackApp = async (appId, userId, targetVersion) => {
       [userId, appId, 'success', `Rollback a ${targetVersion}`, JSON.stringify({ version: targetVersion, deployUrl: deploy.url })]
     );
 
-    console.log(`\n✅ ===== ROLLBACK COMPLETADO =====\n`);
     return { success: true, version: targetVersion, deployUrl: deploy.url };
 
   } catch (error) {
     console.error(`\n❌ ===== ERROR EN ROLLBACK =====`);
     console.error(error);
     await query(`UPDATE apps SET deployment_status = 'failed', updated_at = NOW() WHERE id = $1`, [appId]);
-    await query(
-      `INSERT INTO logs (user_id, app_id, log_type, message, metadata) VALUES ($1, $2, $3, $4, $5)`,
-      [userId, appId, 'error', 'Error en rollback', JSON.stringify({ error: error.message })]
-    );
     return { success: false, error: error.message };
   }
 };
@@ -526,15 +659,11 @@ export const rollbackApp = async (appId, userId, targetVersion) => {
 
 export const suspendApp = async (appId, userId, reason = 'Subscription inactive') => {
   try {
-    console.log(`\n🚫 ===== SUSPENDIENDO APP: ${appId} =====\n`);
-
     const appResult = await query(`SELECT * FROM apps WHERE id = $1 AND user_id = $2`, [appId, userId]);
     if (appResult.rows.length === 0) throw new Error('App not found');
 
     const app = appResult.rows[0];
-
     if (app.vercel_deployment_id) {
-      console.log(`🗑️ Eliminando deployment...`);
       await deleteVercelDeployment(app.vercel_deployment_id);
     }
 
@@ -548,12 +677,10 @@ export const suspendApp = async (appId, userId, reason = 'Subscription inactive'
       [userId, appId, 'warning', 'App suspendida', JSON.stringify({ reason })]
     );
 
-    console.log(`\n✅ ===== APP SUSPENDIDA =====\n`);
     return { success: true, message: 'App suspendida' };
 
   } catch (error) {
-    console.error(`\n❌ ===== ERROR EN SUSPENSIÓN =====`);
-    console.error(error);
+    console.error('❌ Error en suspensión:', error);
     return { success: false, error: error.message };
   }
 };
@@ -564,8 +691,6 @@ export const suspendApp = async (appId, userId, reason = 'Subscription inactive'
 
 export const reactivateApp = async (appId, userId) => {
   try {
-    console.log(`\n✅ ===== REACTIVANDO APP: ${appId} =====\n`);
-
     const appResult = await query(
       `SELECT a.*, av.code FROM apps a
        LEFT JOIN app_versions av ON a.id = av.app_id
@@ -585,7 +710,8 @@ export const reactivateApp = async (appId, userId) => {
 
     if (!code) throw new Error('No code found for reactivation');
 
-    console.log(`\n🚀 Desplegando última versión...\n`);
+    code = normalizeCode(code);
+
     const envVars = {
       VITE_SUPABASE_URL: process.env.SUPABASE_URL,
       VITE_SUPABASE_ANON_KEY: process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_KEY,
@@ -605,18 +731,16 @@ export const reactivateApp = async (appId, userId) => {
       [userId, appId, 'success', 'App reactivada', JSON.stringify({ deployUrl: deploy.url })]
     );
 
-    console.log(`\n✅ ===== APP REACTIVADA =====\n`);
     return { success: true, deployUrl: deploy.url };
 
   } catch (error) {
-    console.error(`\n❌ ===== ERROR EN REACTIVACIÓN =====`);
-    console.error(error);
+    console.error('❌ Error en reactivación:', error);
     return { success: false, error: error.message };
   }
 };
 
 // ═══════════════════════════════════════════════════════════════════
-// 8️⃣ UTILIDADES
+// 8️⃣ UTILIDADES INTERNAS
 // ═══════════════════════════════════════════════════════════════════
 
 function prepareFilesForBackup(code, appId, appName, version) {

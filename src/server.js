@@ -55,23 +55,50 @@ jobService.startJobProcessor();
 app.use(sentry.sentryRequestHandler());
 app.use(sentry.sentryTracingHandler());
 app.use(helmet());
+
+// ✅ CORS corregido — maneja preflight OPTIONS correctamente
+const allowedOrigins = [
+  'https://autoapporchestrator.com',
+  'https://www.autoapporchestrator.com',
+  'http://localhost:3000',
+  process.env.FRONTEND_URL
+].filter(Boolean);
+
 app.use(cors({
   origin: function(origin, callback) {
-    const allowedOrigins = [
-      'https://autoapporchestrator.com',
-      'https://www.autoapporchestrator.com',
-      'http://localhost:3000'
-    ];
-    if (!origin || allowedOrigins.includes(origin)) {
+    // Permitir requests sin origin (mobile, Postman, server-to-server)
+    if (!origin) return callback(null, true);
+
+    if (allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      console.log('⚠️ CORS blocked origin:', origin);
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
+  optionsSuccessStatus: 200 // Para browsers legacy
+}));
+
+// ✅ Responder preflight OPTIONS en TODAS las rutas
+app.options('*', cors({
+  origin: function(origin, callback) {
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.includes(origin)) {
       callback(null, true);
     } else {
       callback(new Error('Not allowed by CORS'));
     }
   },
-  credentials: true
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
+  optionsSuccessStatus: 200
 }));
 
-// IMPORTANTE: Webhook de Stripe necesita RAW
+// IMPORTANTE: Webhook de Stripe necesita RAW body
 app.use('/api/stripe/webhook', express.raw({ type: 'application/json' }));
 
 app.use(express.json({ limit: '10mb' }));
@@ -90,10 +117,11 @@ app.use(rateLimiter);
 // ============================================
 
 app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'ok', 
+  res.json({
+    status: 'ok',
     timestamp: new Date().toISOString(),
     environment: process.env.NODE_ENV,
+    cors_origins: allowedOrigins,
     services: {
       database: 'connected',
       sentry: process.env.SENTRY_DSN ? 'enabled' : 'disabled',

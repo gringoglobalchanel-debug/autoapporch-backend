@@ -227,15 +227,40 @@ process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
 process.on('unhandledRejection', (err) => {
-  console.error('❌ Unhandled Promise Rejection:', err);
+  console.error('❌ Unhandled Promise Rejection:', err?.message || err);
   sentry.captureException(err);
-  if (process.env.NODE_ENV === 'production') gracefulShutdown('unhandledRejection');
+
+  if (process.env.NODE_ENV === 'production') {
+    // Errores de DB son recuperables — NO apagar el servidor
+    const isDbError =
+      err?.message?.includes('Connection terminated') ||
+      err?.message?.includes('timeout') ||
+      err?.message?.includes('ECONNRESET') ||
+      err?.message?.includes('connection refused') ||
+      err?.code === 'ECONNRESET';
+
+    if (isDbError) {
+      console.warn('⚠️ DB connection error — servidor continúa, el pool se recuperará automáticamente');
+    } else {
+      gracefulShutdown('unhandledRejection');
+    }
+  }
 });
 
 process.on('uncaughtException', (err) => {
-  console.error('❌ Uncaught Exception:', err);
+  console.error('❌ Uncaught Exception:', err?.message || err);
   sentry.captureException(err);
-  gracefulShutdown('uncaughtException');
+
+  // Solo apagar en errores realmente fatales
+  const isDbError =
+    err?.message?.includes('Connection terminated') ||
+    err?.message?.includes('ECONNRESET');
+
+  if (!isDbError) {
+    gracefulShutdown('uncaughtException');
+  } else {
+    console.warn('⚠️ DB uncaught exception — servidor continúa');
+  }
 });
 
 export default app;

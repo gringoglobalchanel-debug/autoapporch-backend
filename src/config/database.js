@@ -1,5 +1,6 @@
 /**
  * Configuración y pool de conexión a PostgreSQL
+ * Con reconexión automática y sin process.exit en errores de DB
  */
 
 import pg from 'pg';
@@ -15,93 +16,106 @@ const pool = new Pool({
   ssl: process.env.NODE_ENV === 'production' ? {
     rejectUnauthorized: false
   } : false,
-  max: 20, // Máximo de conexiones
-  idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 2000,
+  max: 10,                          // Reducido de 20 — más estable en Railway
+  min: 2,                           // Mantener mínimo 2 conexiones vivas
+  idleTimeoutMillis: 60000,         // 60s antes de cerrar conexión idle
+  connectionTimeoutMillis: 10000,   // 10s timeout (era 2s — muy poco)
+  acquireTimeoutMillis: 30000,      // 30s para obtener conexión del pool
+  allowExitOnIdle: false,           // No cerrar el proceso cuando el pool esté idle
 });
 
-// Evento de error
-pool.on('error', (err) => {
-  console.error('❌ Unexpected error on idle client', err);
-  process.exit(-1);
+// ✅ CRÍTICO: NO hacer process.exit() — solo loguear el error
+pool.on('error', (err, client) => {
+  console.error('⚠️ DB pool error (conexión idle):', err.message);
+  // El pool se recupera automáticamente — no necesitamos hacer nada
 });
 
-// Evento de conexión
-pool.on('connect', () => {
-  console.log('✅ Database connected successfully');
+pool.on('connect', (client) => {
+  console.log('✅ Nueva conexión DB establecida');
+});
+
+pool.on('remove', (client) => {
+  console.log('🔌 Conexión DB removida del pool');
 });
 
 /**
- * Ejecutar query SQL
- * @param {string} text - Query SQL
- * @param {Array} params - Parámetros de la query
- * @returns {Promise} - Resultado de la query
+ * Ejecutar query SQL con reintentos automáticos
  */
-export const query = async (text, params) => {
+export const query = async (text, params, retries = 3) => {
   const start = Date.now();
-  try {
-    const res = await pool.query(text, params);
-    const duration = Date.now() - start;
-    
-    if (process.env.NODE_ENV !== 'production') {
-      console.log('📊 Query executed', { text, duration, rows: res.rowCount });
+
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const res = await pool.query(text, params);
+      const duration = Date.now() - start;
+
+      if (process.env.NODE_ENV !== 'production') {
+        console.log('📊 Query executed', { duration: `${duration}ms`, rows: res.rowCount });
+      }
+
+      return res;
+    } catch (error) {
+      const isRetryable = 
+        error.message?.includes('Connection terminated') ||
+        error.message?.includes('timeout') ||
+        error.message?.includes('ECONNRESET') ||
+        error.message?.includes('connection refused') ||
+        error.code === 'ECONNRESET' ||
+        error.code === '57P01'; // admin shutdown
+
+      if (isRetryable && attempt < retries) {
+        const waitMs = attempt * 1000; // 1s, 2s, 3s
+        console.warn(`⚠️ DB query failed (intento ${attempt}/${retries}), reintentando en ${waitMs}ms...`);
+        await new Promise(resolve => setTimeout(resolve, waitMs));
+        continue;
+      }
+
+      console.error('❌ Database query error:', error.message);
+      throw error;
     }
-    
-    return res;
-  } catch (error) {
-    console.error('❌ Database query error:', error);
-    throw error;
   }
 };
 
 /**
  * Obtener un cliente del pool para transacciones
- * @returns {Promise} - Cliente de PostgreSQL
  */
 export const getClient = async () => {
   const client = await pool.connect();
-  
-  // Wrapper para queries
-  const originalQuery = client.query;
-  const originalRelease = client.release;
-  
-  // Timeout para liberar el cliente
+
+  const originalQuery = client.query.bind(client);
+  const originalRelease = client.release.bind(client);
+
+  // Timeout para liberar el cliente si se olvida
   const timeout = setTimeout(() => {
-    console.error('❌ Client checkout timeout');
-    client.release();
-  }, 5000);
-  
-  // Override del método query para logging
-  client.query = (...args) => {
-    return originalQuery.apply(client, args);
-  };
-  
-  // Override del método release
+    console.error('❌ Client checkout timeout — liberando forzosamente');
+    try { originalRelease(); } catch (e) {}
+  }, 30000); // 30s (era 5s — muy poco para queries lentas)
+
+  client.query = (...args) => originalQuery(...args);
+
   client.release = () => {
     clearTimeout(timeout);
     client.query = originalQuery;
     client.release = originalRelease;
-    return originalRelease.apply(client);
+    return originalRelease();
   };
-  
+
   return client;
 };
 
 /**
  * Ejecutar múltiples queries en una transacción
- * @param {Function} callback - Función con las queries
- * @returns {Promise} - Resultado de la transacción
  */
 export const transaction = async (callback) => {
   const client = await getClient();
-  
+
   try {
     await client.query('BEGIN');
     const result = await callback(client);
     await client.query('COMMIT');
     return result;
   } catch (error) {
-    await client.query('ROLLBACK');
+    try { await client.query('ROLLBACK'); } catch (e) {}
     throw error;
   } finally {
     client.release();
@@ -110,14 +124,13 @@ export const transaction = async (callback) => {
 
 /**
  * Verificar conexión a la base de datos
- * @returns {Promise<boolean>}
  */
 export const checkConnection = async () => {
   try {
     await pool.query('SELECT NOW()');
     return true;
   } catch (error) {
-    console.error('❌ Database connection failed:', error);
+    console.error('❌ Database connection failed:', error.message);
     return false;
   }
 };

@@ -9,7 +9,6 @@ const anthropic = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY
 });
 
-// Palabras clave que indican que se necesita backend
 const BACKEND_KEYWORDS = [
   'marketplace', 'tienda', 'ecommerce', 'e-commerce', 'shop', 'store',
   'pagos', 'payment', 'stripe', 'checkout',
@@ -43,7 +42,6 @@ class ClaudeService {
     return this.sanitizeCode(code);
   }
 
-  // Detectar si la app necesita backend
   needsBackend(description) {
     const desc = description.toLowerCase();
     return BACKEND_KEYWORDS.some(keyword => desc.includes(keyword));
@@ -77,9 +75,6 @@ class ClaudeService {
     return { text: fullText, tokens: inputTokens + outputTokens };
   }
 
-  // ─────────────────────────────────────────
-  // GENERAR FRONTEND (React SPA)
-  // ─────────────────────────────────────────
   async generateFrontend(description, options = {}) {
     const { style, colors, googleApis, requiresPayments, isFullstack, apiBaseUrl } = options;
 
@@ -121,15 +116,15 @@ TECHNICAL RULES:
 - Accented chars ONLY inside JSX text nodes
 - All JSX tags must be properly closed
 ${isFullstack ? `- This app connects to a REST API at ${apiBaseUrl || 'http://localhost:4000/api'}
-- Use fetch() for all data operations (GET, POST, PUT, DELETE)
+- Use fetch() for all data operations
 - Show loading states while fetching
-- Handle API errors gracefully with error messages
+- Handle API errors gracefully
 - Use useEffect to load data on mount
-- Include JWT token in headers: Authorization: Bearer token (get from localStorage)
+- Include JWT token in headers: Authorization: Bearer token
 - Show login/register forms that call the API
-- After login, store token in localStorage and show authenticated UI` : ''}
+- After login, store token in localStorage` : ''}
 ${googleApis?.length ? `- Integrate Google APIs: ${googleApis.join(', ')}` : ''}
-${requiresPayments ? `- PAYMENTS: Stripe is loaded via script tag. Use window.Stripe('${process.env.STRIPE_PUBLISHABLE_KEY || 'pk_test_YOUR_KEY'}')` : ''}
+${requiresPayments ? `- PAYMENTS: Stripe loaded via script tag. Use window.Stripe('${process.env.STRIPE_PUBLISHABLE_KEY || 'pk_test_YOUR_KEY'}')` : ''}
 
 Respond with ONLY the React code. No markdown, no explanations. Start with: import React`;
 
@@ -137,69 +132,59 @@ Respond with ONLY the React code. No markdown, no explanations. Start with: impo
     return { text: result.text, tokens: result.tokens };
   }
 
-  // ─────────────────────────────────────────
-  // GENERAR BACKEND (Express + Node.js)
-  // ─────────────────────────────────────────
   async generateBackend(description, options = {}) {
     const { requiresPayments, googleApis } = options;
 
-    const systemPrompt = `You are an expert Node.js/Express backend developer. Generate a complete, production-ready Express.js backend API.
+    const systemPrompt = `You are an expert Node.js/Express backend developer. Generate a complete Express.js backend API.
 
 REQUIREMENTS:
 - Use Express.js with ES modules (import/export)
 - Include all necessary routes for the described app
 - Use JWT for authentication (jsonwebtoken package)
 - Include middleware: cors, express.json, authentication
-- Use in-memory storage (Map/Array) — no database setup needed for now
+- Use in-memory storage (Map/Array) — no database setup needed
 - Include proper error handling
-- All routes must be RESTful
-- Include CORS headers for frontend at http://localhost:3000
-${requiresPayments ? `- Include Stripe integration for payments
-- Use Stripe secret key from process.env.STRIPE_SECRET_KEY
-- Include webhook handling` : ''}
+- RESTful routes
+- CORS for frontend at http://localhost:3000
+${requiresPayments ? `- Include Stripe integration\n- Use process.env.STRIPE_SECRET_KEY` : ''}
 
-STRUCTURE — generate a SINGLE server.js file with:
+STRUCTURE — single server.js file:
 1. All imports at top
 2. Express app setup with CORS and JSON middleware
-3. In-memory data stores (const users = new Map(), etc)
+3. In-memory data stores
 4. Auth routes: POST /api/auth/register, POST /api/auth/login
-5. All business logic routes based on the app description
-6. JWT auth middleware function
-7. Protected routes using the middleware
-8. app.listen(4000) at the bottom
+5. All business logic routes
+6. JWT auth middleware
+7. Protected routes
+8. app.listen(4000)
 
-CRITICAL RULES:
+CRITICAL:
 - Single file: server.js
-- ES modules syntax (import, export)  
+- ES modules (import/export)
 - Start with: import express from 'express'
 - End with: app.listen(4000, ...)
-- No TypeScript, no database imports
-- Include sample/seed data in the in-memory stores
-- All endpoints must return JSON
+- Include sample seed data
 
-Respond with ONLY the server.js code. No markdown, no explanations. Start with: import express`;
+Respond with ONLY the server.js code. No markdown. Start with: import express`;
 
-    const result = await this.generateWithStreaming(systemPrompt, `Generate a complete backend API for this app:\n\n${description}`);
+    const result = await this.generateWithStreaming(systemPrompt, `Generate backend API for:\n\n${description}`);
     return { text: result.text, tokens: result.tokens };
   }
 
-  // ─────────────────────────────────────────
-  // MÉTODO PRINCIPAL
-  // ─────────────────────────────────────────
   async generateApp(description, options = {}) {
     try {
-      const { style, colors, googleApis, requiresPayments, stripePriceIds } = options;
-      const isFullstack = this.needsBackend(description);
-
-      console.log(`🔍 Tipo de app: ${isFullstack ? 'FULLSTACK (frontend + backend)' : 'FRONTEND solo'}`);
-      console.log(`🌊 Generando con streaming...`);
+      const { style, colors, googleApis, requiresPayments } = options;
       const startTime = Date.now();
+
+      // ✅ FIX CRÍTICO: let en lugar de const para poder reasignar
+      let isFullstack = this.needsBackend(description);
+
+      console.log(`🔍 Tipo: ${isFullstack ? 'FULLSTACK' : 'FRONTEND'}`);
 
       let frontendCode, backendCode, totalTokens = 0;
 
       if (isFullstack) {
-        // Generar frontend y backend en paralelo
-        console.log('⚙️ Generando frontend y backend en paralelo...');
+        console.log('⚙️ Generando frontend + backend en paralelo...');
         const [frontendResult, backendResult] = await Promise.all([
           this.generateFrontend(description, { style, colors, googleApis, requiresPayments, isFullstack: true }),
           this.generateBackend(description, { requiresPayments, googleApis })
@@ -211,28 +196,29 @@ Respond with ONLY the server.js code. No markdown, no explanations. Start with: 
 
         console.log(`✅ Frontend: ${frontendCode.split('\n').length} líneas`);
         console.log(`✅ Backend: ${backendCode.split('\n').length} líneas`);
+
+        // ✅ Ahora funciona porque isFullstack es let
+        if (!backendCode || backendCode.length < 100) {
+          console.warn('⚠️ Backend inválido, solo frontend');
+          isFullstack = false;
+          backendCode = null;
+        }
+
       } else {
-        // Solo frontend
         const frontendResult = await this.generateFrontend(description, { style, colors, googleApis, requiresPayments, isFullstack: false });
         frontendCode = this.extractCode(frontendResult.text);
         totalTokens = frontendResult.tokens;
-
         console.log(`✅ Frontend: ${frontendCode.split('\n').length} líneas`);
       }
 
       const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-      console.log(`✅ Generación completada en ${elapsed}s — ${totalTokens} tokens`);
+      console.log(`✅ Listo en ${elapsed}s — ${totalTokens} tokens`);
 
       // Validar frontend
-      if (!frontendCode.includes('export default') || frontendCode.length < 200) {
-        console.error('❌ Frontend inválido o muy corto');
+      if (!frontendCode || !frontendCode.includes('export default') || frontendCode.length < 200) {
+        console.error('❌ Frontend inválido, longitud:', frontendCode?.length);
+        console.error('❌ Preview:', frontendCode?.substring(0, 300));
         return { success: false, error: 'Codigo frontend invalido' };
-      }
-
-      // Validar backend si aplica
-      if (isFullstack && (!backendCode || backendCode.length < 100)) {
-        console.warn('⚠️ Backend inválido, continuando solo con frontend');
-        isFullstack = false;
       }
 
       return {
@@ -240,11 +226,12 @@ Respond with ONLY the server.js code. No markdown, no explanations. Start with: 
         code: frontendCode,
         backendCode: isFullstack ? backendCode : null,
         isFullstack,
-        tokensUsed: totalTokens
+        tokensUsed: totalTokens,
+        duration: Date.now() - startTime
       };
 
     } catch (error) {
-      console.error('Error en ClaudeService.generateApp:', error);
+      console.error('❌ Error en ClaudeService.generateApp:', error);
       return { success: false, error: error.message };
     }
   }
